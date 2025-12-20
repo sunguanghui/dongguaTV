@@ -95,42 +95,67 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease
 
-      # 签名 APK (使用 Debug 密钥签名 Release 包，确保可安装)
+      # 签名 APK
+      # 优先使用 GitHub Secrets 配置的 Release 密钥
+      # 如果未配置，自动生成并使用临时 Debug 密钥签名
       - name: Sign APK
-        id: sign_app
-        uses: r0adkll/sign-android-release@v1
-        with:
-          releaseDirectory: android/app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.SIGNING_KEY || '' }}
-          alias: ${{ secrets.ALIAS || 'androiddebugkey' }}
-          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD || 'android' }}
-          keyPassword: ${{ secrets.KEY_PASSWORD || 'android' }}
-        env:
-          # 如果没有配置 secrets，自动回退到使用 debug.keystore
-          BUILD_TOOLS_VERSION: "34.0.0"
-
-      # 如果没有配置签名密钥，手动使用 debug.keystore 签名
-      - name: Fallback Sign with Debug Key
-        if: env.SIGNED_RELEASE_FILE == ''
         run: |
-          echo "No custom signing key found. Signing with Debug Keystore..."
+          # 查找 Build Tools (优先使用较新版本)
+          BUILD_TOOLS_VERSION=$(ls $ANDROID_HOME/build-tools/ | sort -V | tail -n 1)
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
+          ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/zipalign"
           
-          # 创建 debug keystore (如果不存在)
-          if [ ! -f ~/.android/debug.keystore ]; then
-             mkdir -p ~/.android
-             keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          echo "Using Build Tools: $BUILD_TOOLS_VERSION"
+          
+          UNSIGNED_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          ALIGNED_APK="android/app/build/outputs/apk/release/app-release-aligned.apk"
+          SIGNED_APK="android/app/build/outputs/apk/release/app-release.apk"
+          
+          # 1. 密钥准备
+          KEYSTORE_FILE="release.keystore"
+          if [ -n "${{ secrets.SIGNING_KEY }}" ]; then
+            echo "🔐 Using Release Key from Secrets"
+            echo "${{ secrets.SIGNING_KEY }}" | base64 -d > $KEYSTORE_FILE
+            STORE_PASS="${{ secrets.KEY_STORE_PASSWORD }}"
+            KEY_ALIAS="${{ secrets.ALIAS }}"
+            KEY_PASS="${{ secrets.KEY_PASSWORD }}"
+          else
+            echo "⚠️ No Secrets found. Generating Debug Key for signing..."
+            # 生成临时 Debug 密钥 (Java 21 兼容格式)
+            keytool -genkeypair -v \
+              -keystore $KEYSTORE_FILE \
+              -storetype PKCS12 \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            
+            STORE_PASS="android"
+            KEY_ALIAS="androiddebugkey"
+            KEY_PASS="android"
           fi
           
-          # 找到未签名的 APK
-          UNSIGNED_APK="android/app/build/outputs/apk/release/app-release-unsigned.apk"
-          SIGNED_APK="android/app/build/outputs/apk/release/app-release-signed.apk"
+          # 2. Zipalign 对齐 (签名可以通过，但 Release 包通常建议先对齐)
+          echo "📏 Aligning APK..."
+          $ZIPALIGN -v -p 4 "$UNSIGNED_APK" "$ALIGNED_APK"
           
-          # 使用 apksigner 签名
-          $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks ~/.android/debug.keystore --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android --out "$SIGNED_APK" "$UNSIGNED_APK"
+          # 3. 签名
+          echo "✍️ Signing APK..."
+          $APKSIGNER sign \
+            --ks "$KEYSTORE_FILE" \
+            --ks-pass pass:"$STORE_PASS" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass pass:"$KEY_PASS" \
+            --out "$SIGNED_APK" \
+            "$ALIGNED_APK"
           
-          # 替换原来的 APK 以便后续步骤处理
-          mv "$SIGNED_APK" "android/app/build/outputs/apk/release/app-release.apk"
-          rm "$UNSIGNED_APK"
+          # 清理
+          rm "$UNSIGNED_APK" "$ALIGNED_APK" "$KEYSTORE_FILE"
+          
+          echo "✅ APK Signed successfully!"
 
       - name: List APK files
         run: |
