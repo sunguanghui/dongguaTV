@@ -2523,9 +2523,10 @@
                 <div class="section-header" style="display: flex; align-items: center;">
                     <div class="section-line" style="background: linear-gradient(135deg, #667eea, #764ba2);"></div>
                     <div class="section-title"><i class="fas fa-history"></i> 继续观看</div>
-                    <!-- 同步状态图标 (隐蔽显示) -->
-                    <span v-if="syncEnabled" style="margin-left: 8px; font-size: 12px; opacity: 0.6;"
-                        :title="syncStatus === 'syncing' ? '正在同步...' : syncStatus === 'success' ? '已同步' : syncStatus === 'error' ? '同步失败' : '云同步已启用'">
+                    <!-- 同步状态图标 (双击退出登录) -->
+                    <span v-if="syncEnabled" style="margin-left: 8px; font-size: 12px; opacity: 0.6; cursor: pointer;"
+                        :title="syncStatus === 'syncing' ? '正在同步...' : syncStatus === 'success' ? '已同步' : syncStatus === 'error' ? '同步失败' : '云同步已启用 (双击退出)'"
+                        @dblclick="confirmLogout">
                         <i v-if="syncStatus === 'syncing'" class="fas fa-sync-alt fa-spin" style="color: #60a5fa;"></i>
                         <i v-else-if="syncStatus === 'success'" class="fas fa-cloud-upload-alt"
                             style="color: #46d369;"></i>
@@ -2729,7 +2730,11 @@
         </div>
 
         <div class="footer">
-            <div style="font-size:10px; margin-top:5px; opacity:0.5;">Data provided by TMDb & Maccms APIs</div>
+            <!-- 隐藏的退出登录按钮：连续点击3次退出 -->
+            <div style="font-size:10px; margin-top:5px; opacity:0.5; cursor: default; user-select: none;"
+                @click="handleFooterClick" :title="footerClickCount >= 2 ? '再点击1次退出登录' : ''">
+                Data provided by TMDb & Maccms APIs
+            </div>
         </div>
 
         <!-- ★★★ TMDb 电影详情弹窗 ★★★ -->
@@ -2990,11 +2995,18 @@
                 const data = await res.json();
 
                 if (data.success) {
-                    // Save auth state (use hash returned from server)
+                    // 始终保存 Token 用于同步功能
+                    localStorage.setItem(AUTH_STORAGE_KEY, data.passwordHash);
+
+                    // 如果勾选了"记住登录"，设置长期有效期
                     if (remember) {
                         const expiry = Date.now() + (365 * 24 * 60 * 60 * 1000); // 365 days
-                        // Server returns passwordHash on success
-                        localStorage.setItem(AUTH_STORAGE_KEY, data.passwordHash);
+                        localStorage.setItem(AUTH_EXPIRY_KEY, expiry.toString());
+                    } else {
+                        // 不记住登录：设置会话有效期（浏览器关闭后）- 使用 sessionStorage 标记
+                        sessionStorage.setItem('emax_session_only', 'true');
+                        // 设置短期有效期（1天），下次打开页面时会重新验证
+                        const expiry = Date.now() + (24 * 60 * 60 * 1000);
                         localStorage.setItem(AUTH_EXPIRY_KEY, expiry.toString());
                     }
 
@@ -3133,6 +3145,7 @@
                     syncStatus: 'idle',  // 同步状态: idle, syncing, success, error
                     syncToken: '',  // 用户同步 Token (密码哈希)
                     lastSyncTime: 0,  // 上次同步时间戳
+                    footerClickCount: 0,  // 用于隐蔽退出登录的点击计数
 
                     rowLeftButtons: {}, // 存储各分类榜单左侧按钮显示状态 { movieRow: false, ... }
 
@@ -3167,26 +3180,26 @@
                     movieList: [], tvList: [], list_cn: [], list_krjp: [],
                     list_scifi: [], list_action: [], list_comedy: [], list_horror: [],
                     categories: [
+                        // 按 rowConfigs 顺序排列（randomRow 不在分类中）
                         { name: '电影', icon: 'fa-film', action: 'scroll', value: 'movieRow', color: 'linear-gradient(135deg, #FF512F 0%, #DD2476 100%)' },
                         { name: '剧集', icon: 'fa-tv', action: 'scroll', value: 'tvRow', color: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' },
                         { name: '国产', icon: 'fa-dragon', action: 'scroll', value: 'cnRow', color: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' },
                         { name: '美剧', icon: 'fa-flag-usa', action: 'scroll', value: 'usRow', color: 'linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%)' },
                         { name: '日韩', icon: 'fa-mask', action: 'scroll', value: 'krjpRow', color: 'linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%)' },
                         { name: '动漫', icon: 'fa-ghost', action: 'scroll', value: 'animeRow', color: 'linear-gradient(135deg, #a1c4fd 0%, #c2e9fb 100%)' },
-                        { name: '动作', icon: 'fa-bomb', action: 'scroll', value: 'actionRow', color: 'linear-gradient(135deg, #30cfd0 0%, #330867 100%)' },
                         { name: '科幻', icon: 'fa-rocket', action: 'scroll', value: 'scifiRow', color: 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)' },
-                        { name: '喜剧', icon: 'fa-laugh-squint', action: 'scroll', value: 'comedyRow', color: 'linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%)' },
+                        { name: '动作', icon: 'fa-bomb', action: 'scroll', value: 'actionRow', color: 'linear-gradient(135deg, #30cfd0 0%, #330867 100%)' },
+                        { name: '喜剧', icon: 'fa-laugh-squint', action: 'scroll', value: 'comedyRow', color: 'linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)' },
                         { name: '犯罪', icon: 'fa-user-secret', action: 'scroll', value: 'crimeRow', color: 'linear-gradient(135deg, #89f7fe 0%, #66a6ff 100%)' },
                         { name: '爱情', icon: 'fa-heart', action: 'scroll', value: 'romanceRow', color: 'linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%)' },
-                        { name: '悬疑', icon: 'fa-search', action: 'scroll', value: 'mysteryRow', color: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
-                        { name: '历史', icon: 'fa-landmark', action: 'scroll', value: 'historyRow', color: 'linear-gradient(135deg, #accbee 0%, #e7f0fd 100%)' },
                         { name: '家庭', icon: 'fa-home', action: 'scroll', value: 'familyRow', color: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)' },
                         { name: '纪录', icon: 'fa-video', action: 'scroll', value: 'docRow', color: 'linear-gradient(135deg, #fff1eb 0%, #ace0f9 100%)' },
                         { name: '战争', icon: 'fa-fighter-jet', action: 'scroll', value: 'warRow', color: 'linear-gradient(135deg, #ff0844 0%, #ffb199 100%)' },
-                        { name: '冒险', icon: 'fa-compass', action: 'scroll', value: 'adventureRow', color: 'linear-gradient(135deg, #e9defa 0%, #fbfcdb 100%)' },
-                        { name: '综艺', icon: 'fa-microphone-alt', action: 'scroll', value: 'varietyRow', color: 'linear-gradient(135deg, #d299c2 0%, #fef9d7 100%)' },
                         { name: '恐怖', icon: 'fa-skull', action: 'scroll', value: 'horrorRow', color: 'linear-gradient(135deg, #434343 0%, #000000 100%)' },
-                        { name: '奇幻', icon: 'fa-hat-wizard', action: 'scroll', value: 'fantasyRow', color: 'linear-gradient(135deg, #fccb90 0%, #d57eeb 100%)' }
+                        { name: '悬疑', icon: 'fa-search', action: 'scroll', value: 'mysteryRow', color: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
+                        { name: '奇幻', icon: 'fa-hat-wizard', action: 'scroll', value: 'fantasyRow', color: 'linear-gradient(135deg, #fccb90 0%, #d57eeb 100%)' },
+                        { name: '综艺', icon: 'fa-microphone-alt', action: 'scroll', value: 'varietyRow', color: 'linear-gradient(135deg, #d299c2 0%, #fef9d7 100%)' },
+                        { name: '历史', icon: 'fa-landmark', action: 'scroll', value: 'historyRow', color: 'linear-gradient(135deg, #accbee 0%, #e7f0fd 100%)' }
                     ]
                 }
             },
@@ -3721,6 +3734,56 @@
                     }
                 },
 
+                // 退出登录（切换账户）
+                confirmLogout() {
+                    if (confirm('确定要退出登录吗？\n退出后需要重新输入密码。\n\n⚠️ 为防止观看历史混淆，本地历史将被清除。')) {
+                        // 清除认证信息
+                        localStorage.removeItem('emax_auth_hash');
+                        localStorage.removeItem('emax_auth_expiry');
+                        sessionStorage.removeItem('emax_session_only');
+
+                        // 清除本地观看历史（防止不同用户数据交叉）
+                        localStorage.removeItem('donggua_watch_history');
+
+                        // 清除所有播放进度记录
+                        const keysToRemove = [];
+                        for (let i = 0; i < localStorage.length; i++) {
+                            const key = localStorage.key(i);
+                            if (key && key.startsWith('donggua_progress_')) {
+                                keysToRemove.push(key);
+                            }
+                        }
+                        keysToRemove.forEach(key => localStorage.removeItem(key));
+
+                        // 清除同步状态
+                        this.syncEnabled = false;
+                        this.syncToken = '';
+                        this.watchHistory = [];
+
+                        console.log('[登录] 已退出，本地数据已清除');
+
+                        // 刷新页面显示密码输入框
+                        window.location.reload();
+                    }
+                },
+
+                // 页脚隐蔽退出（连续点击3次触发）
+                handleFooterClick() {
+                    this.footerClickCount++;
+
+                    // 2秒内没有继续点击则重置计数
+                    clearTimeout(this._footerClickTimer);
+                    this._footerClickTimer = setTimeout(() => {
+                        this.footerClickCount = 0;
+                    }, 2000);
+
+                    // 点击3次触发退出确认
+                    if (this.footerClickCount >= 3) {
+                        this.footerClickCount = 0;
+                        this.confirmLogout();
+                    }
+                },
+
                 // 格式化观看时间
                 formatWatchTime(isoString) {
                     if (!isoString) return '';
@@ -3920,14 +3983,18 @@
                     }
                     console.log(`[DEBUG toggleRowExpand] viewPages[key] after=`, this.viewPages[key]);
                 },
-                // 滚动到指定区域
+                // 滚动到指定区域（使用 -section 后缀的 ref）
                 scrollToSection(refName) {
-                    let el = this.$refs[refName];
-                    if (Array.isArray(el)) el = el[0]; // v-for ref 修正
-                    if (el) {
-                        const top = el.getBoundingClientRect().top + window.scrollY - 100;
-                        window.scrollTo({ top: top, behavior: 'smooth' });
-                    }
+                    this.$nextTick(() => {
+                        const refKey = refName + '-section';
+                        const sectionRef = this.$refs[refKey];
+                        let el = Array.isArray(sectionRef) ? sectionRef[0] : sectionRef;
+                        if (el) {
+                            // 预留更多空间确保标题可见（至少 120px）
+                            const top = el.getBoundingClientRect().top + window.scrollY - 120;
+                            window.scrollTo({ top: top, behavior: 'smooth' });
+                        }
+                    });
                 },
 
                 // 获取当前查看页的数据（每页20条）
