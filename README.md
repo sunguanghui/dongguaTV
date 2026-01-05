@@ -738,7 +738,16 @@ docker run -d -p 3000:3000 \
 
 如果您 Fork 了本项目并希望永久修改默认配置：
 
-1.  编辑 `capacitor.config.json`，修改 `server.url` 为您的服务器地址：
+##### 📱 配置文件位置
+
+| 版本 | 配置文件路径 | App ID |
+|-----|-------------|--------|
+| **手机版** | `capacitor.config.json` | `com.ednovas.donguatv` |
+| **电视版** | `android-tv/capacitor.config.json` | `com.ednovas.donguatv.tv` |
+
+两个版本的配置格式相同，只需修改 `server.url` 即可更改内置网站地址：
+
+1.  编辑对应的 `capacitor.config.json`，修改 `server.url` 为您的服务器地址：
     ```json
     {
       "appId": "com.ednovas.donguatv",
@@ -766,6 +775,7 @@ docker run -d -p 3000:3000 \
     cd android && ./gradlew assembleRelease
     ```
     APK 位于 `android/app/build/outputs/apk/release/`
+
 
 #### 🏠 内网 HTTP 使用说明
 
