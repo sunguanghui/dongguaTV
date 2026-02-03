@@ -19,6 +19,28 @@ const TMDB_API_KEY = process.env.TMDB_API_KEY || ''; // Keep Required
 const TMDB_PROXY_URL = process.env['TMDB_PROXY_URL'] || '';
 const ACCESS_PASSWORDS = (process.env['ACCESS_PASSWORD'] || '').split(',').map(p => p.trim()).filter(Boolean);
 
+// 新增：直接嵌入站点配置 JSON（优先于 REMOTE_DB_URL）
+// 格式：SITES_JSON = '{"sites":[{"key":"xxx","name":"xxx","api":"https://..."}]}'
+// 或 Base64 编码的 JSON
+let EMBEDDED_SITES = null;
+const SITES_JSON_RAW = process.env['SITES_JSON'] || '';
+if (SITES_JSON_RAW) {
+    try {
+        // 尝试直接解析 JSON
+        EMBEDDED_SITES = JSON.parse(SITES_JSON_RAW);
+        console.log(`[Vercel API] SITES_JSON: ✓ Loaded ${EMBEDDED_SITES.sites?.length || 0} sites (direct JSON)`);
+    } catch (e1) {
+        // 尝试 Base64 解码后解析
+        try {
+            const decoded = Buffer.from(SITES_JSON_RAW, 'base64').toString('utf-8');
+            EMBEDDED_SITES = JSON.parse(decoded);
+            console.log(`[Vercel API] SITES_JSON: ✓ Loaded ${EMBEDDED_SITES.sites?.length || 0} sites (Base64)`);
+        } catch (e2) {
+            console.error('[Vercel API] SITES_JSON: ✗ Invalid format (must be JSON or Base64)');
+        }
+    }
+}
+
 // ========== 密码哈希映射 ==========
 const PASSWORD_HASH_MAP = {};
 ACCESS_PASSWORDS.forEach((pwd, index) => {
@@ -27,8 +49,8 @@ ACCESS_PASSWORDS.forEach((pwd, index) => {
 });
 
 // ========== 内存缓存 ==========
-let remoteDbCache = null;
-let remoteDbLastFetch = 0;
+let remoteDbCache = EMBEDDED_SITES;  // 如果有嵌入配置，直接用作初始缓存
+let remoteDbLastFetch = EMBEDDED_SITES ? Date.now() : 0;
 const REMOTE_DB_CACHE_TTL = 5 * 60 * 1000; // 5分钟
 
 // TMDB 请求缓存
@@ -40,11 +62,54 @@ console.log('[Vercel API] Initializing...');
 console.log(`[Vercel API] TMDB_API_KEY: ${TMDB_API_KEY ? '✓ Configured' : '✗ Missing'}`);
 console.log(`[Vercel API] TMDB_PROXY_URL: ${TMDB_PROXY_URL || '(not set)'}`);
 console.log(`[Vercel API] REMOTE_DB_URL: ${REMOTE_DB_URL ? '✓ Configured' : '(not set)'}`);
+console.log(`[Vercel API] SITES_JSON: ${EMBEDDED_SITES ? `✓ ${EMBEDDED_SITES.sites?.length} sites embedded` : '(not set)'}`);
 console.log(`[Vercel API] ACCESS_PASSWORD: ${ACCESS_PASSWORDS.length} password(s)`);
+
+// ========== IP 检测 (与 server.js 保持一致) ==========
+const ipLocationCache = new Map();
+const IP_CACHE_TTL = 3600 * 1000; // 缓存1小时
+
+function getClientIP(req) {
+    return req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+        req.headers['x-real-ip'] ||
+        req.headers['cf-connecting-ip'] ||
+        req.socket?.remoteAddress ||
+        '';
+}
+
+async function isChineseIP(ip) {
+    if (!ip || ip === '127.0.0.1' || ip === '::1') return false;
+    const cached = ipLocationCache.get(ip);
+    if (cached && (Date.now() - cached.time < IP_CACHE_TTL)) return cached.isCN;
+    try {
+        const response = await axios.get(`https://api.ip.sb/geoip/${ip}`, {
+            timeout: 3000,
+            headers: { 'User-Agent': 'DongguaTV/1.0' }
+        });
+        let isCN = false;
+        if (response.data.country_code === 'CN') {
+            const excludeRegions = ['Hong Kong', 'Macau', 'Taiwan', '香港', '澳门', '台湾'];
+            const region = response.data.region || response.data.city || '';
+            if (!excludeRegions.some(r => region.includes(r))) isCN = true;
+        }
+        ipLocationCache.set(ip, { isCN, time: Date.now() });
+        console.log(`[IP Detection] ${ip} -> ${isCN ? '中国大陆' : '海外'}`);
+        return isCN;
+    } catch (error) {
+        console.error(`[IP Detection Error] ${ip}:`, error.message);
+        return false;
+    }
+}
 
 // ========== API: /api/sites ==========
 app.get('/api/sites', async (req, res) => {
     try {
+        // 优先使用嵌入的站点配置（不过期）
+        if (EMBEDDED_SITES) {
+            return res.json(EMBEDDED_SITES);
+        }
+
+        // 使用远程配置（带缓存）
         const now = Date.now();
         if (remoteDbCache && now - remoteDbLastFetch < REMOTE_DB_CACHE_TTL) {
             return res.json(remoteDbCache);
@@ -81,7 +146,35 @@ app.get('/api/config', (req, res) => {
 });
 
 // ========== API: /api/debug ==========
-app.get('/api/debug', (req, res) => {
+app.get('/api/debug', async (req, res) => {
+    // 尝试加载远程配置以显示状态
+    let dbStatus = 'not_configured';
+    let sitesCount = 0;
+    let dbError = null;
+
+    if (REMOTE_DB_URL) {
+        try {
+            if (remoteDbCache) {
+                dbStatus = 'cached';
+                sitesCount = remoteDbCache.sites?.length || 0;
+            } else {
+                const response = await axios.get(REMOTE_DB_URL, { timeout: 5000 });
+                if (response.data && Array.isArray(response.data.sites)) {
+                    dbStatus = 'loaded';
+                    sitesCount = response.data.sites.length;
+                    // 更新缓存
+                    remoteDbCache = response.data;
+                    remoteDbLastFetch = Date.now();
+                } else {
+                    dbStatus = 'invalid_format';
+                }
+            }
+        } catch (err) {
+            dbStatus = 'fetch_failed';
+            dbError = err.message;
+        }
+    }
+
     res.json({
         environment: 'Vercel Serverless',
         node_version: process.version,
@@ -89,7 +182,14 @@ app.get('/api/debug', (req, res) => {
             TMDB_API_KEY: TMDB_API_KEY ? 'configured' : 'missing',
             TMDB_PROXY_URL: TMDB_PROXY_URL ? 'configured' : 'not_set',
             ACCESS_PASSWORD: ACCESS_PASSWORDS.length > 0 ? `${ACCESS_PASSWORDS.length} password(s)` : 'not_set',
-            REMOTE_DB_URL: REMOTE_DB_URL ? 'configured' : 'not_set'
+            REMOTE_DB_URL: REMOTE_DB_URL ? 'configured' : 'not_set',
+            SITES_JSON: EMBEDDED_SITES ? `embedded (${EMBEDDED_SITES.sites?.length} sites)` : 'not_set'
+        },
+        remote_db: {
+            status: dbStatus,
+            sites_count: sitesCount,
+            error: dbError,
+            url_preview: REMOTE_DB_URL ? REMOTE_DB_URL.substring(0, 50) + '...' : null
         },
         cache_type: 'memory',
         timestamp: new Date().toISOString()
@@ -150,14 +250,26 @@ app.get('/api/tmdb-proxy', async (req, res) => {
     }
 
     try {
-        const TMDB_BASE = 'https://api.themoviedb.org/3';
+        // 获取用户 IP 并判断是否来自中国大陆（与 server.js 逻辑一致）
+        const clientIP = getClientIP(req);
+
+        // 只有配置了代理 URL 且用户来自中国大陆时，才使用代理
+        let useProxy = false;
+        if (TMDB_PROXY_URL) {
+            useProxy = await isChineseIP(clientIP);
+        }
+
+        const TMDB_BASE = useProxy
+            ? `${TMDB_PROXY_URL.replace(/\/$/, '')}/api/3`  // 代理需要 /api/3 前缀
+            : 'https://api.themoviedb.org/3';  // 海外用户直连官方 API
+
         const response = await axios.get(`${TMDB_BASE}${tmdbPath}`, {
             params: {
                 ...params,
                 api_key: TMDB_API_KEY,
                 language: 'zh-CN'
             },
-            timeout: 10000
+            timeout: 15000  // 增加超时时间（代理可能较慢）
         });
 
         // 缓存结果
@@ -186,29 +298,32 @@ app.get('/api/tmdb-image/:size/:filename', async (req, res) => {
         return res.status(400).send('Invalid parameters');
     }
 
-    const tmdbUrl = `https://image.tmdb.org/t/p/${size}/${filename}`;
-
     try {
-        // 支持自定义反代 URL
-        let targetUrl = tmdbUrl;
+        // 获取用户 IP 并判断是否来自中国大陆（与 TMDB API 代理逻辑一致）
+        const clientIP = getClientIP(req);
+
+        // 只有配置了代理 URL 且用户来自中国大陆时，才使用代理
+        let useProxy = false;
         if (TMDB_PROXY_URL) {
-            const proxyBase = TMDB_PROXY_URL.replace(/\/$/, '');
-            targetUrl = `${proxyBase}/t/p/${size}/${filename}`;
+            useProxy = await isChineseIP(clientIP);
         }
 
-        // console.log(`[Vercel Image] Proxying: ${targetUrl}`);
+        const targetUrl = useProxy
+            ? `${TMDB_PROXY_URL.replace(/\/$/, '')}/t/p/${size}/${filename}`  // 代理
+            : `https://image.tmdb.org/t/p/${size}/${filename}`;  // 直连官方
+
         const response = await axios({
             url: targetUrl,
             method: 'GET',
             responseType: 'stream',
-            timeout: 10000
+            timeout: 15000  // 增加超时时间
         });
 
         // 缓存控制：公共缓存，有效期1天
         res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
         response.data.pipe(res);
     } catch (error) {
-        console.error(`[Vercel Image Error] ${tmdbUrl}:`, error.message);
+        console.error(`[Vercel Image Error] ${size}/${filename}:`, error.message);
         res.status(404).send('Image not found');
     }
 });
@@ -225,7 +340,10 @@ app.get('/api/search', async (req, res) => {
     // 获取站点配置
     let sites = [];
     try {
-        if (REMOTE_DB_URL) {
+        // 优先使用嵌入的站点配置
+        if (EMBEDDED_SITES && EMBEDDED_SITES.sites) {
+            sites = EMBEDDED_SITES.sites;
+        } else if (REMOTE_DB_URL) {
             const now = Date.now();
             if (remoteDbCache && now - remoteDbLastFetch < REMOTE_DB_CACHE_TTL) {
                 sites = remoteDbCache.sites || [];
@@ -313,7 +431,10 @@ app.get('/api/detail', async (req, res) => {
     // 获取站点配置
     let sites = [];
     try {
-        if (remoteDbCache) {
+        // 优先使用嵌入的站点配置
+        if (EMBEDDED_SITES && EMBEDDED_SITES.sites) {
+            sites = EMBEDDED_SITES.sites;
+        } else if (remoteDbCache) {
             sites = remoteDbCache.sites || [];
         } else if (REMOTE_DB_URL) {
             const response = await axios.get(REMOTE_DB_URL, { timeout: 5000 });
