@@ -711,7 +711,7 @@ docker run -d -p 3000:3000 \
 ### ▲ Vercel 部署
 适合零成本快速上线。
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fednovas%2FdongguaTV&env=TMDB_API_KEY,REMOTE_DB_URL,ACCESS_PASSWORD,TMDB_PROXY_URL&envDescription=TMDB_API_KEY%20and%20REMOTE_DB_URL%20are%20required.%20Others%20are%20optional.&envLink=https%3A%2F%2Fgithub.com%2Fednovas%2FdongguaTV%23-vercel-%E7%8E%AF%E5%A2%83%E5%8F%98%E9%87%8F%E9%85%8D%E7%BD%AE%E6%B3%A8%E6%84%8F%E4%BA%8B%E9%A1%B9)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fednovas%2FdongguaTV&env=TMDB_API_KEY,SITES_JSON,REMOTE_DB_URL,ACCESS_PASSWORD,TMDB_PROXY_URL&envDescription=TMDB_API_KEY%20is%20required.%20Use%20SITES_JSON%20(Base64)%20or%20REMOTE_DB_URL%20for%20site%20config.&envLink=https%3A%2F%2Fgithub.com%2Fednovas%2FdongguaTV%23-vercel-%E7%8E%AF%E5%A2%83%E5%8F%98%E9%87%8F%E9%85%8D%E7%BD%AE%E6%B3%A8%E6%84%8F%E4%BA%8B%E9%A1%B9)
 
 *(请确保先将本项目fork到您自己的 GitHub 仓库，点击上方按钮即可一键导入部署)*
 
@@ -899,42 +899,50 @@ docker run -d -p 3000:3000 \
 
 如果您 Fork 了本项目并希望永久修改默认配置：
 
-##### 📱 配置文件位置
+##### 📱 修改服务器地址
 
-| 配置文件路径 | App ID |
-|-------------|--------|
-| `capacitor.config.json` | `com.ednovas.donguatv` |
+编辑 `capacitor.config.json`，修改 `server.url`：
 
-只需修改 `server.url` 即可更改内置网站地址：
+```json
+{
+  "server": {
+    "url": "https://your-server.com",
+    "cleartext": true
+  }
+}
+```
 
-1.  编辑对应的 `capacitor.config.json`，修改 `server.url` 为您的服务器地址：
-    ```json
-    {
-      "appId": "com.ednovas.donguatv",
-      "appName": "E视界",
-      "webDir": "public",
-      "server": {
-        "url": "https://your-server.com",
-        "cleartext": true
-      }
-    }
-    ```
+##### 📱 修改 App 名称
 
-2.  提交更改并推送 Tag 触发自动构建：
-    ```bash
-    git add capacitor.config.json
-    git commit -m "修改服务器地址"
-    git tag v1.0.0
-    git push origin main --tags
-    ```
+> ⚠️ `capacitor.config.json` 中的 `appName` 字段**不会自动同步**到 Android 原生项目。必须直接修改 Android 文件。
 
-3.  或者本地手动构建：
-    ```bash
-    npm install
-    npx cap sync android
-    cd android && ./gradlew assembleRelease
-    ```
-    APK 位于 `android/app/build/outputs/apk/release/`
+编辑 `android/app/src/main/res/values/strings.xml`：
+```xml
+<resources>
+    <string name="app_name">你的应用名</string>
+    <string name="title_activity_main">你的应用名</string>
+    ...
+</resources>
+```
+
+##### 📱 修改版本号
+
+编辑 `android/app/build.gradle`，找到 `defaultConfig` 块：
+```groovy
+defaultConfig {
+    versionCode 2        // 整数，每次发版递增
+    versionName "1.1"    // 显示给用户的版本号
+}
+```
+
+##### 🏗️ 本地构建
+
+```bash
+npm install
+npx cap sync android
+cd android && ./gradlew assembleRelease
+```
+APK 位于 `android/app/build/outputs/apk/release/`
 
 #### ⚠️ App 使用问题与替代方案
 
