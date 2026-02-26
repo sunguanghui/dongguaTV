@@ -1827,6 +1827,11 @@
             overflow-y: auto;
         }
 
+        /* 播放页打开时禁止底层页面滚动，避免双滚动条 */
+        body.detail-open {
+            overflow: hidden !important;
+        }
+
         .detail-overlay.active {
             display: block;
             animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
@@ -3175,9 +3180,12 @@
                 <i class="fas fa-cog"></i>
                 <span>偏好设置</span>
             </div>
-            <!-- 隐藏的退出登录按钮：连续点击3次退出 -->
-            <div style="font-size:10px; margin-top:5px; opacity:0.5; cursor: default; user-select: none;"
-                @click="handleFooterClick" :title="footerClickCount >= 2 ? '再点击1次退出登录' : ''">
+            <!-- 退出登录按钮 -->
+            <div class="tv-mode-toggle" @click="confirmLogout" style="margin-top: 10px;" title="退出登录">
+                <i class="fas fa-sign-out-alt"></i>
+                <span>退出登录</span>
+            </div>
+            <div style="font-size:10px; margin-top:12px; opacity:0.5; user-select: none;">
                 Data provided by TMDb & Maccms APIs
             </div>
         </div>
@@ -3400,7 +3408,18 @@
 
                     <!-- 选集列表 (全宽网格) -->
                     <div>
-                        <div class="panel-title">选集播放</div>
+                        <div class="panel-title" style="display: flex; align-items: center;">
+                            选集播放
+                            <span @click="refreshEpisodes"
+                                style="margin-left: 10px; font-size: 12px; color: #888; cursor: pointer; padding: 2px 8px; border-radius: 4px; border: 1px solid #444; transition: all 0.2s;"
+                                :style="{ opacity: refreshingEpisodes ? 0.5 : 1, pointerEvents: refreshingEpisodes ? 'none' : 'auto' }"
+                                @mouseenter="$event.target.style.color='#fff'; $event.target.style.borderColor='#888'"
+                                @mouseleave="$event.target.style.color='#888'; $event.target.style.borderColor='#444'">
+                                <i :class="['fas', refreshingEpisodes ? 'fa-spinner fa-spin' : 'fa-sync-alt']"
+                                    style="margin-right: 4px;"></i>
+                                {{ refreshingEpisodes ? '刷新中...' : '刷新集数' }}
+                            </span>
+                        </div>
                         <div v-if="loadingDetail" class="text-center py-5 text-muted"><i
                                 class="fas fa-spinner fa-spin"></i>
                             加载中...</div>
@@ -3667,11 +3686,38 @@
 
         let dp = null;
 
+        // 💾 倍速恢复辅助 — 多次重试确保 HLS.js 不会重置
+        function ensurePlaybackSpeed(player) {
+            try {
+                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
+                if (!savedSpeed || isNaN(savedSpeed) || savedSpeed === 1) return;
+                if (!player || !player.video) return;
+
+                const applySpeed = () => {
+                    if (player.video && Math.abs(player.video.playbackRate - savedSpeed) > 0.01) {
+                        player.speed(savedSpeed);
+                    }
+                };
+
+                applySpeed();
+                setTimeout(applySpeed, 200);
+                setTimeout(applySpeed, 500);
+                setTimeout(applySpeed, 1500);
+
+                const onPlaying = () => {
+                    applySpeed();
+                    player.video.removeEventListener('playing', onPlaying);
+                };
+                player.video.addEventListener('playing', onPlaying);
+            } catch (e) { }
+        }
+
         createApp({
             data() {
                 return {
                     searchTimer: null,  // 防抖搜索定时器
                     isTestingSources: false,  // 正在测速状态
+                    refreshingEpisodes: false,  // 刷新集数中
                     showInfoModal: false,  // 电影详情弹窗
                     infoModalData: null,   // 弹窗数据
                     TMDB_IMG_URL: TMDB_IMG_URL,  // 模板中使用
@@ -3756,7 +3802,7 @@
                     syncStatus: 'idle',  // 同步状态: idle, syncing, success, error
                     syncToken: '',  // 用户同步 Token (密码哈希)
                     lastSyncTime: 0,  // 上次同步时间戳
-                    footerClickCount: 0,  // 用于隐蔽退出登录的点击计数
+                    // footerClickCount removed (now using visible logout button)
 
                     rowLeftButtons: {}, // 存储各分类榜单左侧按钮显示状态 { movieRow: false, ... }
 
@@ -4446,6 +4492,7 @@
                             name: groupData.name,
                             pic: groupData.pic,
                             sources: groupData.sources.map((s, idx) => ({
+                                vod_id: s.vod_id,  // 用于刷新集数
                                 vod_name: s.vod_name,
                                 vod_pic: s.vod_pic,
                                 vod_play_url: s.vod_play_url,
@@ -4593,22 +4640,7 @@
                     }
                 },
 
-                // 页脚隐蔽退出（连续点击3次触发）
-                handleFooterClick() {
-                    this.footerClickCount++;
-
-                    // 2秒内没有继续点击则重置计数
-                    clearTimeout(this._footerClickTimer);
-                    this._footerClickTimer = setTimeout(() => {
-                        this.footerClickCount = 0;
-                    }, 2000);
-
-                    // 点击3次触发退出确认
-                    if (this.footerClickCount >= 3) {
-                        this.footerClickCount = 0;
-                        this.confirmLogout();
-                    }
-                },
+                // handleFooterClick removed (now using visible logout button)
 
                 // 格式化观看时间
                 formatWatchTime(isoString) {
@@ -4686,6 +4718,7 @@
                         this.currentSource = bestSource;
 
                         this.showDetail = true;
+                        document.body.classList.add('detail-open');
 
                         if (bestSource && bestSource.vod_play_url) {
                             // 解析播放地址（只从这一个资源站取）
@@ -4715,6 +4748,8 @@
                                 await this.$nextTick();
                                 if (targetEpisode && targetEpisode.url) {
                                     this.play(targetEpisode.url, bestSource.site_name);
+                                    // 后台自动刷新集数（不阻塞播放）
+                                    this.refreshEpisodes();
                                     return;
                                 }
                             }
@@ -5088,7 +5123,7 @@
                                 console.log('[投屏] 无法显示投屏菜单:', err);
 
                                 // 只有在明确报错无法显示菜单时，才提示用户
-                                alert('无可用投屏设备或浏览器受限。\n\n1. 请确保电视/投影已开机并连接同一WiFi\n2. 确保通过 HTTPS 访问\n3. 或使用浏览器菜单中的"投射"功能');
+                                alert('未找到投屏设备。\n\n请先在手机下拉通知栏 → 点击「投屏/Cast」→ 搜索并连接您的电视，连接成功后再点击一键投屏即可。');
                             });
                         return;
                     }
@@ -5518,6 +5553,7 @@
                 async openDetail(group) {
                     this.currentGroup = group;
                     this.showDetail = true;
+                    document.body.classList.add('detail-open');
                     this.isTestingSources = true;  // 开始测速
                     this.currentSource = null;  // 确保清空之前的选择
                     this.episodeList = [];
@@ -5791,6 +5827,7 @@
                 },
                 closeDetail() {
                     this.showDetail = false;
+                    document.body.classList.remove('detail-open');
                     if (dp) dp.pause();
 
                     // 释放屏幕常亮
@@ -5857,6 +5894,84 @@
                         }
                     } catch (e) { console.log('[切换资源] 错误:', e); }
                     this.loadingDetail = false;
+                },
+
+                // 🔄 强制刷新集数列表（绕过所有缓存）
+                async refreshEpisodes() {
+                    if (!this.currentSource || this.refreshingEpisodes) return;
+                    this.refreshingEpisodes = true;
+                    try {
+                        const source = this.currentSource;
+                        let vodId = source.vod_id;
+
+                        // 如果 vod_id 不存在（旧版历史记录），通过搜索获取
+                        if (!vodId && this.currentGroup?.name) {
+                            console.log('[刷新集数] vod_id 缺失，通过搜索获取...');
+                            try {
+                                const searchRes = await fetch(`/api/search?wd=${encodeURIComponent(this.currentGroup.name)}&site_key=${encodeURIComponent(source.site_key)}`);
+                                const searchData = await searchRes.json();
+                                if (searchData.list && searchData.list.length > 0) {
+                                    // 找到匹配当前 site_key 的结果
+                                    const match = searchData.list.find(item =>
+                                        item.site_key === source.site_key && item.vod_name === this.currentGroup.name
+                                    );
+                                    if (match) {
+                                        vodId = match.vod_id;
+                                        source.vod_id = vodId;  // 缓存以备后用
+                                        console.log('[刷新集数] 通过搜索找到 vod_id:', vodId);
+                                    }
+                                }
+                            } catch (searchErr) {
+                                console.warn('[刷新集数] 搜索获取 vod_id 失败:', searchErr);
+                            }
+                        }
+
+                        if (!vodId) {
+                            console.warn('[刷新集数] 无法获取 vod_id，跳过刷新');
+                            this.refreshingEpisodes = false;
+                            return;
+                        }
+
+                        // 带 nocache 参数，通知服务器跳过缓存
+                        const res = await fetch(`/api/detail?site_key=${source.site_key}&id=${vodId}&nocache=1`);
+                        const data = await res.json();
+                        if (data.list && data.list.length > 0) {
+                            const detail = data.list[0];
+                            const oldCount = this.episodeList.length;
+                            // 更新缓存
+                            source._cachedDetail = detail;
+                            source.vod_play_url = detail.vod_play_url;
+                            source.vod_content = detail.vod_content || detail.vod_blurb || '';
+                            // 记住当前正在播放的集数
+                            const currentEpName = this.episodeList?.find(ep => ep.url === this.currentUrl)?.name;
+                            // 重新解析集数列表（不自动切换集数，仅更新列表）
+                            let playSource = detail.vod_play_url || '';
+                            if (playSource.includes('$$$')) {
+                                const sets = playSource.split('$$$');
+                                playSource = sets.find(s => s.toLowerCase().includes('m3u8')) || sets[0];
+                            }
+                            this.episodeList = playSource.split('#').map(ep => {
+                                const p = ep.split('$');
+                                return { name: p.length > 1 ? p[0] : '正片', url: p.length > 1 ? p[1] : p[0] };
+                            });
+                            const newCount = this.episodeList.length;
+                            console.log(`[刷新集数] 成功，${oldCount} → ${newCount} 集`);
+                            // 更新历史记录中的数据（防止下次从历史播放又用旧数据）
+                            if (this.currentGroup) {
+                                const groupSource = this.currentGroup.sources?.find(s => s.site_key === source.site_key);
+                                if (groupSource) {
+                                    groupSource.vod_play_url = detail.vod_play_url;
+                                    groupSource._cachedDetail = detail;
+                                    groupSource.vod_id = vodId;  // 保存 vod_id
+                                }
+                            }
+                        } else {
+                            console.warn('[刷新集数] 未获取到数据');
+                        }
+                    } catch (e) {
+                        console.error('[刷新集数] 失败:', e);
+                    }
+                    this.refreshingEpisodes = false;
                 },
 
                 // 解析剧集列表，尝试匹配指定集数
@@ -6710,14 +6825,7 @@
                         let progressRestored = false;
                         dp.on('canplay', () => {
                             // 💾 恢复倍速设置 (每次视频加载都检查)
-                            try {
-                                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
-                                if (savedSpeed && !isNaN(savedSpeed) && dp.video) {
-                                    if (Math.abs(dp.video.playbackRate - savedSpeed) > 0.01) {
-                                        dp.speed(savedSpeed);
-                                    }
-                                }
-                            } catch (e) { }
+                            ensurePlaybackSpeed(dp);
 
                             if (progressRestored) return;
 
@@ -6921,15 +7029,7 @@
                             console.log('[进度记忆-切换] progressRestored:', progressRestored);
 
                             // 💾 恢复倍速设置 (每次切换视频都检查)
-                            try {
-                                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
-                                if (savedSpeed && !isNaN(savedSpeed) && dp.video) {
-                                    if (Math.abs(dp.video.playbackRate - savedSpeed) > 0.01) {
-                                        dp.speed(savedSpeed);
-                                        console.log('[倍速恢复] 切换视频后恢复倍速:', savedSpeed + 'x');
-                                    }
-                                }
-                            } catch (e) { }
+                            ensurePlaybackSpeed(dp);
 
                             if (progressRestored) {
                                 console.log('[进度记忆-切换] 已恢复过，跳过');
