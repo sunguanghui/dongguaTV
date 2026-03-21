@@ -61,7 +61,7 @@
     <!-- SW 版本检测和强制更新（必须在最开头） -->
     <script data-cfasync="false">
         (function () {
-            var REQUIRED_SW_VERSION = 'v20';
+            var REQUIRED_SW_VERSION = 'v23';
             var STORAGE_KEY = 'sw_cleared_' + REQUIRED_SW_VERSION;
 
             // 如果已经为这个版本清理过，不再重复
@@ -129,7 +129,7 @@
 
     <!-- 非关键脚本 (延迟加载) -->
     <script data-cfasync="false" src="libs/js/hls.min.js" defer></script>
-    <script data-cfasync="false" src="libs/js/ad-filter.js" defer></script>
+    <script data-cfasync="false" src="libs/js/ad-filter.js?v=2.1" defer></script>
     <script data-cfasync="false" src="libs/js/DPlayer.min.js" defer></script>
     <script data-cfasync="false" src="libs/js/bootstrap.bundle.min.js" defer></script>
 
@@ -6050,7 +6050,48 @@
                             volume: 0.8,             // 默认音量 80%
                             loop: false,             // 循环播放（可在设置中切换）
                             playbackSpeed: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3],  // 0.25间隔倍速选项
-                            video: { url: finalUrl, type: 'hls' },
+                            video: {
+                                url: finalUrl,
+                                type: 'customHls',
+                                customType: {
+                                    customHls: function(video, player) {
+                                        // 先清理旧的 HLS 实例
+                                        if (window._hlsInstance) {
+                                            window._hlsInstance.destroy();
+                                            window._hlsInstance = null;
+                                        }
+                                        // 使用广告过滤 loader 创建 HLS 实例
+                                        var hlsConfig = {};
+                                        if (window.AdFilter && window.AdFilter.getFilteredLoaderClass) {
+                                            hlsConfig.loader = window.AdFilter.getFilteredLoaderClass();
+                                            console.log('[播放器] 🛡️ 已启用广告过滤 loader');
+                                        }
+                                        var hls = new Hls(hlsConfig);
+                                        hls.loadSource(video.src);
+                                        hls.attachMedia(video);
+                                        // HLS 错误恢复
+                                        hls.on(Hls.Events.ERROR, function(event, data) {
+                                            if (data.fatal) {
+                                                switch (data.type) {
+                                                    case Hls.ErrorTypes.NETWORK_ERROR:
+                                                        console.warn('[HLS] 网络错误，尝试恢复...');
+                                                        hls.startLoad();
+                                                        break;
+                                                    case Hls.ErrorTypes.MEDIA_ERROR:
+                                                        console.warn('[HLS] 媒体错误，尝试恢复...');
+                                                        hls.recoverMediaError();
+                                                        break;
+                                                    default:
+                                                        console.error('[HLS] 致命错误，无法恢复');
+                                                        hls.destroy();
+                                                        break;
+                                                }
+                                            }
+                                        });
+                                        window._hlsInstance = hls;
+                                    }
+                                }
+                            },
                             contextmenu: [
                                 { text: '🎬 E视界MAX', link: '/' },
                                 { text: '⚡ 当前速度: 1x', click: () => { } }
@@ -7020,7 +7061,42 @@
 
                         let progressRestored = false;
 
-                        dp.switchVideo({ url: finalUrl, type: 'hls' });
+                        dp.switchVideo({
+                            url: finalUrl,
+                            type: 'customHls',
+                            customType: {
+                                customHls: function(video, player) {
+                                    if (window._hlsInstance) {
+                                        window._hlsInstance.destroy();
+                                        window._hlsInstance = null;
+                                    }
+                                    var hlsConfig = {};
+                                    if (window.AdFilter && window.AdFilter.getFilteredLoaderClass) {
+                                        hlsConfig.loader = window.AdFilter.getFilteredLoaderClass();
+                                        console.log('[播放器] 🛡️ 已启用广告过滤 loader (切换)');
+                                    }
+                                    var hls = new Hls(hlsConfig);
+                                    hls.loadSource(video.src);
+                                    hls.attachMedia(video);
+                                    hls.on(Hls.Events.ERROR, function(event, data) {
+                                        if (data.fatal) {
+                                            switch (data.type) {
+                                                case Hls.ErrorTypes.NETWORK_ERROR:
+                                                    hls.startLoad();
+                                                    break;
+                                                case Hls.ErrorTypes.MEDIA_ERROR:
+                                                    hls.recoverMediaError();
+                                                    break;
+                                                default:
+                                                    hls.destroy();
+                                                    break;
+                                            }
+                                        }
+                                    });
+                                    window._hlsInstance = hls;
+                                }
+                            }
+                        });
                         console.log('[进度记忆-切换] switchVideo 已调用' + (finalUrl !== url ? ' (代理模式)' : ''));
 
                         // 恢复新视频的进度
