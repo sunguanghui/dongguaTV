@@ -352,6 +352,87 @@
     }
 
     /**
+     * 检测广告时间段（用于跳过模式）
+     * 分析 M3U8 内容，返回广告在播放时间轴上的起止时间
+     * @param {string} content - 原始 M3U8 内容
+     * @returns {Object} { adRanges: [{start, end, duration}], adsRemoved: number, adsDuration: number }
+     */
+    function detectAdTimeRanges(content) {
+        if (!AD_FILTER_CONFIG.enabled || !AD_FILTER_CONFIG.skipDiscontinuityAds) {
+            return { adRanges: [], adsRemoved: 0, adsDuration: 0 };
+        }
+
+        // 主播放列表不处理
+        if (content.includes('#EXT-X-STREAM-INF')) {
+            return { adRanges: [], adsRemoved: 0, adsDuration: 0 };
+        }
+
+        if (!content.includes('#EXT-X-DISCONTINUITY')) {
+            return { adRanges: [], adsRemoved: 0, adsDuration: 0 };
+        }
+
+        try {
+            const parsed = parseM3U8(content);
+            const adIndices = detectAdSegments(parsed.segments);
+
+            if (adIndices.size === 0) {
+                return { adRanges: [], adsRemoved: 0, adsDuration: 0 };
+            }
+
+            // 计算每个分段在时间轴上的累积起始时间
+            const adRanges = [];
+            let cumulativeTime = 0;
+            let currentRangeStart = -1;
+            let currentRangeEnd = -1;
+
+            for (let i = 0; i < parsed.segments.length; i++) {
+                const seg = parsed.segments[i];
+                if (adIndices.has(i)) {
+                    if (currentRangeStart < 0) {
+                        currentRangeStart = cumulativeTime;
+                    }
+                    currentRangeEnd = cumulativeTime + seg.duration;
+                } else {
+                    // 当前分段不是广告，如果之前有广告段，关闭该 range
+                    if (currentRangeStart >= 0) {
+                        adRanges.push({
+                            start: currentRangeStart,
+                            end: currentRangeEnd,
+                            duration: currentRangeEnd - currentRangeStart
+                        });
+                        currentRangeStart = -1;
+                        currentRangeEnd = -1;
+                    }
+                }
+                cumulativeTime += seg.duration;
+            }
+            // 处理最后一个 range（如果广告在末尾）
+            if (currentRangeStart >= 0) {
+                adRanges.push({
+                    start: currentRangeStart,
+                    end: currentRangeEnd,
+                    duration: currentRangeEnd - currentRangeStart
+                });
+            }
+
+            let adsDuration = 0;
+            adIndices.forEach(idx => {
+                adsDuration += parsed.segments[idx].duration;
+            });
+
+            // 记录检测到的广告时间段
+            for (const range of adRanges) {
+                log(`📍 广告时间段: ${range.start.toFixed(1)}s - ${range.end.toFixed(1)}s (${range.duration.toFixed(1)}秒)`);
+            }
+
+            return { adRanges, adsRemoved: adIndices.size, adsDuration };
+        } catch (e) {
+            console.error('[广告过滤] detectAdTimeRanges 错误:', e);
+            return { adRanges: [], adsRemoved: 0, adsDuration: 0 };
+        }
+    }
+
+    /**
      * 过滤 M3U8 内容，移除广告分段
      * @param {string} content - 原始 M3U8 内容
      * @returns {Object} { filtered: string, adsRemoved: number, adsDuration: number }
@@ -490,7 +571,13 @@
                 finalLines.push(line);
             }
 
-            const filtered = finalLines.join('\n');
+            // 🔧 移除所有剩余的 DISCONTINUITY 标签
+            // 广告移除后内容组之间不需要 DISCONTINUITY，
+            // 且 HLS.js 在 DISCONTINUITY 处有音频采样率重置 bug 导致声音低沉
+            const noDiscoLines = finalLines.filter(line => 
+                !line.startsWith('#EXT-X-DISCONTINUITY')
+            );
+            const filtered = noDiscoLines.join('\n');
 
             // 更新统计
             stats.totalAdsFiltered += adIndices.size;
@@ -535,21 +622,35 @@
 
                 callbacks.onSuccess = (response, stats, context, networkDetails) => {
                     // 只处理 m3u8 文件（manifest 或 level）
+                    if (context.type === 'manifest') {
+                        // 新视频加载时重置广告时间段
+                        window._adSkipRanges = null;
+                    }
                     if (context.type === 'manifest' || context.type === 'level') {
                         if (typeof response.data === 'string' && response.data.includes('#EXTM3U')) {
-                            const result = filterM3U8(response.data);
-                            if (result.adsRemoved > 0) {
-                                response.data = result.filtered;
+                            // 🔧 跳过模式：分析广告时间段但不修改 M3U8
+                            // 避免修改流结构导致 HLS.js 音频 codec 问题
+                            const result = detectAdTimeRanges(response.data);
+                            if (result.adRanges.length > 0) {
+                                // 存储广告时间段供播放器跳过
+                                window._adSkipRanges = result.adRanges;
+                                log(`🎯 检测到 ${result.adRanges.length} 个广告时间段，总时长 ${result.adsDuration.toFixed(0)}秒 (跳过模式)`);
 
-                                // 显示过滤通知
+                                // 显示通知
                                 if (AD_FILTER_CONFIG.showNotification) {
                                     setTimeout(() => {
                                         if (window.dp && window.dp.notice) {
-                                            window.dp.notice(`🛡️ 已过滤 ${result.adsRemoved} 个广告 (${result.adsDuration.toFixed(0)}秒)`, 3000);
+                                            window.dp.notice(`🛡️ 检测到 ${result.adRanges.length} 个广告 (${result.adsDuration.toFixed(0)}秒) - 自动跳过`, 3000);
                                         }
                                     }, 1000);
                                 }
+
+                                // 更新统计
+                                stats.totalAdsFiltered += result.adsRemoved;
+                                stats.totalAdDuration += result.adsDuration;
+                                stats.sessionsFiltered++;
                             }
+                            // ⚠️ 不修改 response.data — 保持原始 M3U8 完整
                         }
                     }
 
@@ -578,6 +679,7 @@
 
                 let lastKnownGoodTime = 0;
                 let adDetected = false;
+                let _skipCooldown = false;  // 防止重复跳过
 
                 // 配置的开头跳过
                 if (AD_FILTER_CONFIG.skipFirstSegments && AD_FILTER_CONFIG.firstSegmentSkipDuration > 0) {
@@ -589,25 +691,34 @@
                     });
                 }
 
-                // 监听时间更新，检测异常跳转（可能的广告插入）
+                // 🔧 广告自动跳过：到达广告时间点就直接跳转
                 window.dp.video.addEventListener('timeupdate', function () {
                     const video = window.dp.video;
-                    if (!video) return;
+                    if (!video || _skipCooldown) return;
 
-                    // 如果视频突然跳到开头附近（可能是广告插入点）
-                    // 并且之前已经播放了一段时间，可能是广告
-                    if (lastKnownGoodTime > 30 && video.currentTime < 5) {
-                        if (!adDetected) {
-                            adDetected = true;
-                            log('⚠️ 检测到可能的中途广告跳转');
+                    const currentTime = video.currentTime;
+                    const ranges = window._adSkipRanges;
+
+                    if (ranges && ranges.length > 0) {
+                        for (const range of ranges) {
+                            if (currentTime >= range.start && currentTime < range.end) {
+                                const skipTo = range.end;
+                                log(`⏭️ 广告跳转: ${currentTime.toFixed(1)}s → ${skipTo.toFixed(1)}s`);
+                                _skipCooldown = true;
+                                video.currentTime = skipTo;
+
+                                if (window.dp && window.dp.notice) {
+                                    window.dp.notice(`⏭️ 已跳过 ${range.duration.toFixed(0)}秒广告`, 2000);
+                                }
+
+                                setTimeout(() => { _skipCooldown = false; }, 3000);
+                                break;
+                            }
                         }
-                    } else if (video.currentTime > 10) {
-                        lastKnownGoodTime = video.currentTime;
-                        adDetected = false;
                     }
                 });
 
-                log('✅ 时间跳过检测已启用');
+                log('✅ 广告跳过检测已启用 (跳过模式)');
             }
         }, 500);
     }
